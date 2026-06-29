@@ -3,6 +3,27 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tauri::State;
 
+fn to_sjis_form(params: &[(&str, &str)]) -> String {
+    let (encoder, _, _) = encoding_rs::SHIFT_JIS.new_encoder().encoding().encode("dummy");
+    let _ = encoder;
+    params.iter().map(|(k, v)| {
+        let enc_k = percent_encode_sjis(k);
+        let enc_v = percent_encode_sjis(v);
+        format!("{}={}", enc_k, enc_v)
+    }).collect::<Vec<_>>().join("&")
+}
+
+fn percent_encode_sjis(s: &str) -> String {
+    let (bytes, _, _) = encoding_rs::SHIFT_JIS.encode(s);
+    bytes.iter().map(|&b| {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            (b as char).to_string()
+        } else {
+            format!("%{:02X}", b)
+        }
+    }).collect()
+}
+
 const BASE_URL: &str = "https://kouen.sports.metro.tokyo.lg.jp/web";
 
 struct AppState {
@@ -45,14 +66,42 @@ struct AvailableSlot {
 fn parse_hidden(html: &str, field_name: &str) -> Option<String> {
     let search = format!("name=\"{}\"", field_name);
     let name_pos = html.find(&search)?;
-    // name= 위치에서 가장 가까운 <input 태그 시작점을 역방향 탐색
     let tag_start = html[..name_pos].rfind('<')?;
     let tag_end = name_pos + html[name_pos..].find('>')?;
     let tag = &html[tag_start..=tag_end];
-    // 태그 안에서 value= 탐색 (속성 순서 무관)
     let v_start = tag.find("value=\"")? + 7;
     let v_end = v_start + tag[v_start..].find('"')?;
     Some(tag[v_start..v_end].to_string())
+}
+
+// 페이지의 모든 hidden input 필드를 추출
+fn parse_all_hidden(html: &str) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    let mut pos = 0;
+    while let Some(start) = html[pos..].find("<input") {
+        let abs_start = pos + start;
+        let tag_end = match html[abs_start..].find('>') {
+            Some(e) => abs_start + e + 1,
+            None => break,
+        };
+        let tag = &html[abs_start..tag_end];
+        if tag.contains("type=\"hidden\"") || tag.contains("type='hidden'") {
+            let name = extract_attr(tag, "name");
+            let value = extract_attr(tag, "value");
+            if let Some(n) = name {
+                result.push((n, value.unwrap_or_default()));
+            }
+        }
+        pos = tag_end;
+    }
+    result
+}
+
+fn extract_attr(tag: &str, attr: &str) -> Option<String> {
+    let search = format!("{}=\"", attr);
+    let start = tag.find(&search)? + search.len();
+    let end = start + tag[start..].find('"')?;
+    Some(tag[start..end].to_string())
 }
 
 #[tauri::command]
@@ -208,9 +257,11 @@ async fn reserve_slot(
     let tzone_str = tzone_no.to_string();
     let aki_str = aki_num.to_string();
 
-    // Step 1: 슬롯 선택
+    // Step 1: 슬롯 선택 (AJAX)
     let select_res = client
         .post(format!("{}/rsvWOpeInstReservAjaxAction.do", BASE_URL))
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header("Referer", format!("{}/rsvWOpeInstSrchVacantAction.do", BASE_URL))
         .form(&[
             ("displayNo", "prwrc2000"),
             ("bldCd", bld_cd.as_str()),
@@ -224,6 +275,8 @@ async fn reserve_slot(
         ])
         .send().await.map_err(|e| e.to_string())?
         .text().await.map_err(|e| e.to_string())?;
+
+    eprintln!("[DEBUG] select_res: {}", select_res);
 
     if !select_res.contains("\"selectState\":1") {
         return Err(format!("슬롯 선택 실패: {}", select_res));
@@ -248,7 +301,7 @@ async fn reserve_slot(
             ("selectAreaBcd", bld_cd.as_str()),
             ("selectIcd", "0"),
             ("iniBCd", bld_cd.as_str()),
-            ("iniICd", inst_cd.as_str()),
+            ("iniICd", format!("{}_{}", inst_cd, aki_num).as_str()),
             ("displayNo", "prwrc2000"),
             ("displayNoFrm", "prwrc2000"),
             ("selectSize", "1"),
@@ -273,38 +326,60 @@ async fn reserve_slot(
         .send().await.map_err(|e| e.to_string())?
         .text().await.map_err(|e| e.to_string())?;
 
-    let ins_j_key = parse_hidden(&detail_page, "insIRsvJKey")
+    parse_hidden(&detail_page, "insIRsvJKey")
         .ok_or_else(|| format!("insIRsvJKey 파싱 실패. 페이지 앞부분:\n{}", &detail_page[..detail_page.len().min(500)]))?;
 
-    let stime_zone = parse_hidden(&detail_page, "stimeZoneNo")
-        .unwrap_or_else(|| tzone_str.clone());
-    let etime_zone = parse_hidden(&detail_page, "etimeZoneNo")
-        .unwrap_or_else(|| tzone_str.clone());
+    // 상세 페이지의 hidden 필드 전부 추출
+    let mut hidden_fields = parse_all_hidden(&detail_page);
+    eprintln!("[DEBUG] hidden fields: {:?}", hidden_fields.iter().map(|(k,_)| k).collect::<Vec<_>>());
+
+    // gRecaptcha 관련 변수 탐색
+    for keyword in &["gRecaptchaActive", "gRecaptchaSiteKey", "gRecaptchaErrMsg", "gRecaptchaActionName"] {
+        if let Some(pos) = detail_page.find(keyword) {
+            let s = pos.saturating_sub(10);
+            let e = detail_page.len().min(pos + 200);
+            eprintln!("[DEBUG] {}: {}", keyword, &detail_page[s..e]);
+        } else {
+            eprintln!("[DEBUG] {} : 없음", keyword);
+        }
+    }
 
     let apply_str = apply_num.to_string();
 
-    // Step 3: 예약 확정 (recaptchaToken 빈 값으로 테스트)
+    // 우리가 추가하거나 덮어쓸 필드
+    let overrides = vec![
+        ("purpose", "1000_1030"),
+        ("applyNum", apply_str.as_str()),
+        ("MaxApplyNum", "9999"),
+        ("eventName", ""),
+        ("applyFlg", "1"),
+        ("recaptchaToken", "Failed to load reCAPTCHA JavaScript."),
+    ];
+    for (k, v) in &overrides {
+        if let Some(entry) = hidden_fields.iter_mut().find(|(name, _)| name == k) {
+            entry.1 = v.to_string();
+        } else {
+            hidden_fields.push((k.to_string(), v.to_string()));
+        }
+    }
+
+    let confirm_params: Vec<(&str, &str)> = hidden_fields.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let body = to_sjis_form(&confirm_params);
+    eprintln!("[DEBUG] confirm body (앞 600자): {}", &body[..body.len().min(600)]);
     let confirm_res = client
         .post(format!("{}/rsvWInstRsvApplyAction.do", BASE_URL))
-        .form(&[
-            ("stimeZoneNo", stime_zone.as_str()),
-            ("etimeZoneNo", etime_zone.as_str()),
-            ("purpose", "1000_1030"),
-            ("ppsdCd", "1000"),
-            ("ppsCd", "1030"),
-            ("applyNum", apply_str.as_str()),
-            ("MaxApplyNum", "9999"),
-            ("recaptchaToken", ""),
-            ("displayNo", "prwea1000"),
-            ("selectRsvDetailNo", "0"),
-            ("insIRsvJKey", ins_j_key.as_str()),
-        ])
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
         .send().await.map_err(|e| e.to_string())?
         .text().await.map_err(|e| e.to_string())?;
 
-    // 결과 확인 (어떤 페이지가 반환되는지 확인)
-    let snippet = &confirm_res[..confirm_res.len().min(300)];
-    Ok(format!("확정 응답:\n{}", snippet))
+    // body 태그 이후 내용만 추출해서 반환
+    let body_content = if let Some(pos) = confirm_res.find("<body") {
+        &confirm_res[pos..confirm_res.len().min(pos + 3000)]
+    } else {
+        &confirm_res[..confirm_res.len().min(3000)]
+    };
+    Ok(format!("확정 응답:\n{}", body_content))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
