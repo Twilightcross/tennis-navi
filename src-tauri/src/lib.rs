@@ -64,7 +64,7 @@ struct AvailableSlot {
 }
 
 fn parse_hidden(html: &str, field_name: &str) -> Option<String> {
-    let search = format!("n1ame=\"{}\"", field_name);
+    let search = format!("name=\"{}\"", field_name);
     let name_pos = html.find(&search)?;
     let tag_start = html[..name_pos].rfind('<')?;
     let tag_end = name_pos + html[name_pos..].find('>')?;
