@@ -167,3 +167,70 @@
 - [ ] 자동 예약 기능 포함 여부 결정
 - [ ] 검색 주기 결정 (5분? 10분?)
 - [ ] Mac 알림 클릭 시 이동할 URL 구조 파악
+
+---
+
+## 예약 자동화 진행 상황 (reserve_slot)
+
+### 흐름 (reqwest 기반, src-tauri/src/lib.rs)
+```
+1. POST rsvWOpeInstReservAjaxAction.do   (슬롯 선택, AJAX 헤더 필요)
+   → { "selectState": 1 } 이면 성공
+
+2. POST rsvWOpeReservedApplyAction.do    (예약 상세 페이지 취득)
+   → HTML에서 insIRsvJKey 등 hidden 필드 전부 파싱 (parse_all_hidden)
+
+3. POST rsvWInstRsvApplyAction.do        (예약 확정)
+   → hidden 필드 + purpose/applyNum/recaptchaToken 등 오버라이드
+   → 일본어 값("1面" 등) 포함 → Shift_JIS 퍼센트 인코딩 필요 (to_sjis_form, encoding_rs 사용)
+```
+
+1, 2단계까지는 정상 동작 확인됨. 3단계(확정)에서 reCAPTCHA에 막혀있음.
+
+### reCAPTCHA 차단 — 시도 내역
+| 시도 | recaptchaToken 값 | 결과 |
+|--|--|--|
+| 빈 문자열 | `""` | `システム異常が発生しました。` |
+| 더미 난수 토큰 | `03AGdBq24...` (가짜) | `確認のため、チェックを入れてから...` (체크 에러) |
+| JS 폴백 문자열 | `"Failed to load reCAPTCHA JavaScript."` | 동일하게 체크 에러 |
+
+→ 서버가 Google reCAPTCHA siteverify API로 토큰을 실제 검증함. 가짜 토큰은 전부 실패.
+
+### reCAPTCHA 설정값 (상세 페이지 HTML에서 확인)
+```js
+gRecaptchaActive = true
+gRecaptchaSiteKey = '6Lf_ciYpAAAAAEk3QnqYrrxgT9gjiu6GeNVm2VTa'
+gRecaptchaActionName = 'webRsv'
+gRecaptchaErrMsg = 'Failed to load reCAPTCHA JavaScript.'
+```
+(JS 원본: `js/prwea1000.js`의 `checkTextValue()` 함수 — reCAPTCHA v3, `grecaptcha.execute(siteKey, {action: 'webRsv'})`)
+
+### 채택한 해결 전략: WebView 토큰 헬퍼
+
+- 2captcha 같은 유료 캡챠 솔빙 서비스는 비용 발생 이유로 제외.
+- reCAPTCHA v3는 **도메인 + 사이트 키** 단위로 검증됨 (특정 로그인 페이지일 필요 없음).
+  → 로그인 없이 접근 가능한 `index.jsp` 같은 공개 페이지에서도 동일 사이트 키로 토큰 생성 가능 (이론상).
+- 따라서 예약 본체는 기존 reqwest 흐름(Shift_JIS 인코딩 포함, 이미 검증됨)을 그대로 두고, **reCAPTCHA 토큰만** 별도의 작은 Tauri WebView 창에서 받아온다.
+
+```
+1. reserve_slot 진행 중 (reqwest로 로그인~상세페이지까지 완료)
+2. 숨겨진/작은 WebView 창 오픈 → kouen.sports.metro.tokyo.lg.jp 의 공개 페이지로 이동
+3. WebView 안에서 구글 reCAPTCHA 스크립트(api.js?render=SITE_KEY) 로드
+   → grecaptcha.execute(SITE_KEY, {action: 'webRsv'}) 실행 → 진짜 토큰 획득
+4. Tauri IPC로 토큰을 Rust로 전달 (tauri.conf.json에 dangerousRemoteDomainIpcAccess 설정 필요:
+   domain: kouen.sports.metro.tokyo.lg.jp, window: "recaptcha-helper")
+5. WebView 창 닫고, 받은 진짜 토큰을 기존 to_sjis_form 흐름에 넣어 rsvWInstRsvApplyAction.do POST
+```
+
+**왜 WebView로 전체 흐름을 옮기지 않았는가:**
+브라우저 JS의 `TextEncoder`는 UTF-8만 지원하고 Shift_JIS 인코딩 기능이 없음. 반면 Rust는 `encoding_rs`로 이미 해결됨. 따라서 reCAPTCHA 토큰 획득(브라우저 필요한 부분)만 분리하고, 나머지는 검증된 Rust 코드 재사용.
+
+**미검증 리스크:**
+reCAPTCHA v3는 토큰 유효성(success/fail)과 별개로 **점수(score, 0~1)** 를 매김. 사람처럼 행동(마우스 이동, 체류 시간 등)하지 않는 빈 페이지에서 즉시 스크립트만 실행하면 점수가 낮게 나올 수 있고, 서버가 일정 점수 미만은 거부할 가능성 있음. 실제 사이트가 점검 중이라 미검증 — 사이트 복구 후 테스트 필요.
+
+### TODO (사이트 점검 복구 후)
+- [ ] tauri.conf.json에 `withGlobalTauri: true` + `dangerousRemoteDomainIpcAccess` 추가
+- [ ] `submit_recaptcha_token` Tauri 커맨드 추가 (oneshot 채널로 reserve_slot에 토큰 전달)
+- [ ] `recaptcha-helper` WebviewWindow 생성 로직 추가 (init script로 grecaptcha 실행)
+- [ ] reserve_slot의 recaptchaToken 오버라이드를 실제 받은 토큰으로 교체
+- [ ] 점수 낮아서 거부될 경우 → 페이지 체류 시간 늘리기/마우스 이벤트 시뮬레이션 등 대응 검토
