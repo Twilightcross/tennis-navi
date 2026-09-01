@@ -9,7 +9,12 @@ interface AvailableSlot {
   rsv_num: number;
 }
 
-type Court = [bldCd: string, name: string];
+type Court = [instCd: string, name: string, sportCode: string];
+
+const SPORT_TYPES: [code: string, label: string][] = [
+  ["1030", "인공잔디 코트"],
+  ["1020", "하드코트"],
+];
 
 function formatDay(useDay: number): string {
   const s = String(useDay);
@@ -26,17 +31,23 @@ function App() {
 
   const [date, setDate] = useState(today);
   const [courts, setCourts] = useState<Court[]>([]);
-  const [bldCd, setBldCd] = useState("");
+  const [sportCode, setSportCode] = useState(SPORT_TYPES[0][0]);
+  const [instCd, setInstCd] = useState("");
   const [slots, setSlots] = useState<AvailableSlot[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  const courtsOfType = courts.filter(([, , code]) => code === sportCode);
+
   useEffect(() => {
-    invoke<Court[]>("list_courts").then((list) => {
-      setCourts(list);
-      if (list.length > 0) setBldCd(list[0][0]);
-    });
+    invoke<Court[]>("list_courts").then(setCourts);
   }, []);
+
+  useEffect(() => {
+    if (courtsOfType.length > 0 && !courtsOfType.some(([code]) => code === instCd)) {
+      setInstCd(courtsOfType[0][0]);
+    }
+  }, [sportCode, courts]);
 
   async function handleLogin() {
     setLoginStatus("로그인 중...");
@@ -55,7 +66,7 @@ function App() {
     setError("");
     setSlots([]);
     try {
-      const result = await invoke<AvailableSlot[]>("search_vacant", { date, bldCd });
+      const result = await invoke<AvailableSlot[]>("search_vacant", { date, instCd });
       setSlots(result);
     } catch (e) {
       setError(`에러: ${e}`);
@@ -111,11 +122,22 @@ function App() {
             className="border rounded px-3 py-2 text-sm"
           />
           <select
-            value={bldCd}
-            onChange={(e) => setBldCd(e.target.value)}
+            value={sportCode}
+            onChange={(e) => setSportCode(e.target.value)}
             className="border rounded px-3 py-2 text-sm"
           >
-            {courts.map(([code, name]) => (
+            {SPORT_TYPES.map(([code, label]) => (
+              <option key={code} value={code}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <select
+            value={instCd}
+            onChange={(e) => setInstCd(e.target.value)}
+            className="border rounded px-3 py-2 text-sm"
+          >
+            {courtsOfType.map(([code, name]) => (
               <option key={code} value={code}>
                 {name}
               </option>
@@ -123,7 +145,7 @@ function App() {
           </select>
           <button
             onClick={search}
-            disabled={loading || !bldCd}
+            disabled={loading || !instCd}
             className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
           >
             {loading ? "검색 중..." : "빈 코트 검색"}
