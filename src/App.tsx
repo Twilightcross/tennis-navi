@@ -14,12 +14,15 @@ function formatDay(useDay: number): string {
   return `${s.slice(0, 4)}/${s.slice(4, 6)}/${s.slice(6, 8)}`;
 }
 
+const today = new Date().toISOString().split("T")[0];
+
 function App() {
   const [userId, setUserId] = useState("");
   const [password, setPassword] = useState("");
   const [loginStatus, setLoginStatus] = useState("");
   const [loggedIn, setLoggedIn] = useState(false);
 
+  const [date, setDate] = useState(today);
   const [slots, setSlots] = useState<AvailableSlot[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -41,8 +44,7 @@ function App() {
     setError("");
     setSlots([]);
     try {
-      const today = new Date().toISOString().split("T")[0];
-      const result = await invoke<AvailableSlot[]>("search_vacant", { date: today });
+      const result = await invoke<AvailableSlot[]>("search_vacant", { date });
       setSlots(result);
     } catch (e) {
       setError(`에러: ${e}`);
@@ -89,7 +91,14 @@ function App() {
 
       {/* 검색 */}
       <section>
-        <div className="mb-4">
+        <div className="mb-4 flex items-center gap-2">
+          <input
+            type="date"
+            value={date}
+            min={today}
+            onChange={(e) => setDate(e.target.value)}
+            className="border rounded px-3 py-2 text-sm"
+          />
           <button
             onClick={search}
             disabled={loading}
