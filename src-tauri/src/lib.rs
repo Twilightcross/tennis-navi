@@ -102,75 +102,89 @@ async fn login(
     }
 }
 
+/// (bldCd, 표시명, instCd, selectPpsCd) — 선택 가능한 코트 목록
+const COURTS: &[(&str, &str, &str, &str)] = &[
+    ("1090", "東白鬚公園（人工芝）", "10900030", "1030"),
+    ("1310", "大井ふ頭海浜公園Ａ（ハード）", "13100050", "1020"),
+    ("1315", "大井ふ頭海浜公園Ｂ（ハード）", "13150030", "1020"),
+    ("1350", "有明テニスＡ屋外ハードコート（ハード）", "13500010", "1020"),
+    ("1370", "有明テニスＢインドアコート（ハード）", "13700010", "1020"),
+];
+
+#[tauri::command]
+fn list_courts() -> Vec<(String, String)> {
+    COURTS.iter().map(|(bld_cd, name, ..)| (bld_cd.to_string(), name.to_string())).collect()
+}
+
 #[tauri::command]
 async fn search_vacant(
     state: State<'_, AppState>,
     date: String,
+    bld_cd: String,
 ) -> Result<Vec<AvailableSlot>, String> {
+    let &(bld_cd, park_name, inst_cd, sport_code) = COURTS
+        .iter()
+        .find(|(b, ..)| *b == bld_cd)
+        .ok_or_else(|| format!("알 수 없는 코트입니다: {}", bld_cd))?;
+
     let use_day_str = date.replace("-", "");
     let client = state.client.lock().await;
 
-    let parks = vec![
-        ("東白鬚公園", "1090", "10900030"),
-    ];
+    let ppscl_ppscd = format!("1000_{}", sport_code);
+    let mut init_params = HashMap::new();
+    init_params.insert("daystart", date.as_str());
+    init_params.insert("useDay", use_day_str.as_str());
+    init_params.insert("selectPpsClPpscd", ppscl_ppscd.as_str());
+    init_params.insert("selectPpsClsCd", "1000");
+    init_params.insert("selectPpsCd", sport_code);
+    init_params.insert("selectBldCd", bld_cd);
+    init_params.insert("selectInstCd", inst_cd);
+    init_params.insert("selectAreaBcd", bld_cd);
+    init_params.insert("selectIcd", "0");
+    init_params.insert("penaltyday", "3");
+    init_params.insert("penalty", "3");
+    init_params.insert("dayofweekClearFlg", "1");
+    init_params.insert("timezoneClearFlg", "1");
+    init_params.insert("displayNo", "prwrc2000");
+    init_params.insert("displayNoFrm", "prwrc2000");
+    init_params.insert("selectSize", "0");
+    init_params.insert("applyFlg", "0");
+    init_params.insert("initBcd", "null");
+    init_params.insert("initIcd", "null");
+    init_params.insert("initPpsClPpscd", "null");
+
+    client
+        .post(format!("{}/rsvWOpeInstSrchVacantAction.do", BASE_URL))
+        .form(&init_params)
+        .send().await.map_err(|e| e.to_string())?;
+
+    let mut params = HashMap::new();
+    params.insert("displayNo", "prwrc2000");
+    params.insert("useDay", use_day_str.as_str());
+    params.insert("bldCd", bld_cd);
+    params.insert("instCd", inst_cd);
+    params.insert("transVacantMode", "11");
+    params.insert("clearFlag", "0");
+
+    let body = client
+        .post(format!("{}/rsvWOpeInstSrchVacantAjaxAction.do", BASE_URL))
+        .form(&params)
+        .send().await.map_err(|e| e.to_string())?
+        .text().await.map_err(|e| e.to_string())?;
+
+    let vacant: VacantResponse = serde_json::from_str(&body)
+        .map_err(|e| format!("{}: {}", e, &body[..body.len().min(200)]))?;
 
     let mut slots: Vec<AvailableSlot> = vec![];
-
-    for (park_name, bld_cd, inst_cd) in &parks {
-        let mut init_params = HashMap::new();
-        init_params.insert("daystart", date.as_str());
-        init_params.insert("useDay", use_day_str.as_str());
-        init_params.insert("selectPpsClPpscd", "1000_1030");
-        init_params.insert("selectPpsClsCd", "1000");
-        init_params.insert("selectPpsCd", "1030");
-        init_params.insert("selectBldCd", bld_cd);
-        init_params.insert("selectInstCd", inst_cd);
-        init_params.insert("selectAreaBcd", bld_cd);
-        init_params.insert("selectIcd", "0");
-        init_params.insert("penaltyday", "3");
-        init_params.insert("penalty", "3");
-        init_params.insert("dayofweekClearFlg", "1");
-        init_params.insert("timezoneClearFlg", "1");
-        init_params.insert("displayNo", "prwrc2000");
-        init_params.insert("displayNoFrm", "prwrc2000");
-        init_params.insert("selectSize", "0");
-        init_params.insert("applyFlg", "0");
-        init_params.insert("initBcd", "null");
-        init_params.insert("initIcd", "null");
-        init_params.insert("initPpsClPpscd", "null");
-
-        client
-            .post(format!("{}/rsvWOpeInstSrchVacantAction.do", BASE_URL))
-            .form(&init_params)
-            .send().await.map_err(|e| e.to_string())?;
-
-        let mut params = HashMap::new();
-        params.insert("displayNo", "prwrc2000");
-        params.insert("useDay", use_day_str.as_str());
-        params.insert("bldCd", bld_cd);
-        params.insert("instCd", inst_cd);
-        params.insert("transVacantMode", "11");
-        params.insert("clearFlag", "0");
-
-        let body = client
-            .post(format!("{}/rsvWOpeInstSrchVacantAjaxAction.do", BASE_URL))
-            .form(&params)
-            .send().await.map_err(|e| e.to_string())?
-            .text().await.map_err(|e| e.to_string())?;
-
-        let vacant: VacantResponse = serde_json::from_str(&body)
-            .map_err(|e| format!("{}: {}", e, &body[..body.len().min(200)]))?;
-
-        for tzone in vacant.result {
-            for tr in tzone.time_result {
-                if tr.status == 0 && tr.rsv_num > 0 {
-                    slots.push(AvailableSlot {
-                        park_name: park_name.to_string(),
-                        tzone_name: tzone.tzone_name.trim().to_string(),
-                        use_day: tr.use_day,
-                        rsv_num: tr.rsv_num,
-                    });
-                }
+    for tzone in vacant.result {
+        for tr in tzone.time_result {
+            if tr.status == 0 && tr.rsv_num > 0 {
+                slots.push(AvailableSlot {
+                    park_name: park_name.to_string(),
+                    tzone_name: tzone.tzone_name.trim().to_string(),
+                    use_day: tr.use_day,
+                    rsv_num: tr.rsv_num,
+                });
             }
         }
     }
@@ -190,7 +204,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState { client: Mutex::new(client) })
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![login, search_vacant])
+        .invoke_handler(tauri::generate_handler![login, list_courts, search_vacant])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

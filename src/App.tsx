@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
@@ -8,6 +8,8 @@ interface AvailableSlot {
   use_day: number;
   rsv_num: number;
 }
+
+type Court = [bldCd: string, name: string];
 
 function formatDay(useDay: number): string {
   const s = String(useDay);
@@ -23,9 +25,18 @@ function App() {
   const [loggedIn, setLoggedIn] = useState(false);
 
   const [date, setDate] = useState(today);
+  const [courts, setCourts] = useState<Court[]>([]);
+  const [bldCd, setBldCd] = useState("");
   const [slots, setSlots] = useState<AvailableSlot[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    invoke<Court[]>("list_courts").then((list) => {
+      setCourts(list);
+      if (list.length > 0) setBldCd(list[0][0]);
+    });
+  }, []);
 
   async function handleLogin() {
     setLoginStatus("로그인 중...");
@@ -44,7 +55,7 @@ function App() {
     setError("");
     setSlots([]);
     try {
-      const result = await invoke<AvailableSlot[]>("search_vacant", { date });
+      const result = await invoke<AvailableSlot[]>("search_vacant", { date, bldCd });
       setSlots(result);
     } catch (e) {
       setError(`에러: ${e}`);
@@ -99,9 +110,20 @@ function App() {
             onChange={(e) => setDate(e.target.value)}
             className="border rounded px-3 py-2 text-sm"
           />
+          <select
+            value={bldCd}
+            onChange={(e) => setBldCd(e.target.value)}
+            className="border rounded px-3 py-2 text-sm"
+          >
+            {courts.map(([code, name]) => (
+              <option key={code} value={code}>
+                {name}
+              </option>
+            ))}
+          </select>
           <button
             onClick={search}
-            disabled={loading}
+            disabled={loading || !bldCd}
             className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
           >
             {loading ? "검색 중..." : "빈 코트 검색"}
