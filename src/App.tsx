@@ -12,8 +12,8 @@ interface AvailableSlot {
 type Court = [instCd: string, name: string, sportCode: string];
 
 const SPORT_TYPES: [code: string, label: string][] = [
-  ["1030", "인공잔디 코트"],
-  ["1020", "하드코트"],
+  ["1030", "人工芝コート"],
+  ["1020", "ハードコート"],
 ];
 
 function formatDay(useDay: number): string {
@@ -67,6 +67,7 @@ function App() {
         <div className="mb-4 flex items-center gap-2">
           <input
             type="date"
+            lang="ja"
             value={date}
             min={today}
             onChange={(e) => setDate(e.target.value)}
@@ -99,7 +100,7 @@ function App() {
             disabled={loading || !instCd}
             className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
           >
-            {loading ? "검색 중..." : "빈 코트 검색"}
+            {loading ? "検索中..." : "検索"}
           </button>
         </div>
 
