@@ -26,4 +26,5 @@ reqwest = { version = "0.12", features = ["json", "cookies"] }
 tokio = { version = "1", features = ["full"] }
 lettre = { version = "0.11.23", default-features = false, features = ["builder", "tokio1-native-tls", "smtp-transport"] }
 dotenvy = "0.15.7"
+chrono = "0.4.45"
 

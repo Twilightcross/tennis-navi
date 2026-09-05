@@ -1,9 +1,11 @@
-use lettre::transport::smtp::authentication::Credentials;
-use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tauri::State;
+
+mod courts;
+mod mail;
 
 const BASE_URL: &str = "https://kouen.sports.metro.tokyo.lg.jp/web";
 
@@ -31,12 +33,12 @@ struct TZone {
 #[derive(Serialize, Deserialize)]
 struct VacantResponse { result: Vec<TZone> }
 
-#[derive(Serialize)]
-struct AvailableSlot {
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AvailableSlot {
     park_name: String,
-    tzone_name: String,
-    use_day: i64,
-    rsv_num: i32,
+    pub(crate) tzone_name: String,
+    pub(crate) use_day: i64,
+    pub(crate) rsv_num: i32,
 }
 
 fn parse_hidden(html: &str, field_name: &str) -> Option<String> {
@@ -104,161 +106,131 @@ async fn login(
     }
 }
 
-/// (bldCd, 표시명, instCd, selectPpsCd) — 선택 가능한 코트 목록
-/// instCd가 코트 단위 고유 식별자 (같은 공원이 하드/인공잔디 시설을 모두 가진 경우가 있어 bldCd만으로는 구분 불가)
-const COURTS: &[(&str, &str, &str, &str)] = &[
-    // 하드코트 (selectPpsCd=1020)
-    ("1310", "大井ふ頭海浜公園Ａ", "13100050", "1020"),
-    ("1315", "大井ふ頭海浜公園Ｂ", "13150030", "1020"),
-    ("1350", "有明テニスＡ屋外ハードコート", "13500010", "1020"),
-    ("1370", "有明テニスＢインドアコート", "13700010", "1020"),
-    // 인공잔디 코트 (selectPpsCd=1030)
-    ("1000", "日比谷公園", "10000010", "1030"),
-    ("1010", "芝公園", "10100030", "1030"),
-    ("1040", "猿江恩賜公園", "10400030", "1030"),
-    ("1050", "亀戸中央公園", "10500010", "1030"),
-    ("1060", "木場公園", "10600010", "1030"),
-    ("1070", "祖師谷公園", "10700010", "1030"),
-    ("1090", "東白鬚公園", "10900030", "1030"),
-    ("1100", "浮間公園", "11000020", "1030"),
-    ("1110", "城北中央公園（照明有）", "11100030", "1030"),
-    ("1110", "城北中央公園（照明無）", "11100130", "1030"),
-    ("1120", "赤塚公園", "11200020", "1030"),
-    ("1130", "東綾瀬公園", "11300040", "1030"),
-    ("1140", "舎人公園", "11400030", "1030"),
-    ("1150", "篠崎公園Ａ", "11500050", "1030"),
-    ("1160", "大島小松川公園", "11600030", "1030"),
-    ("1170", "汐入公園", "11700010", "1030"),
-    ("1175", "高井戸公園", "11750030", "1030"),
-    ("1180", "善福寺川緑地", "11800030", "1030"),
-    ("1190", "光が丘公園", "11900050", "1030"),
-    ("1205", "石神井公園Ｂ", "12050030", "1030"),
-    ("1220", "井の頭恩賜公園", "12200020", "1030"),
-    ("1230", "武蔵野中央公園", "12300010", "1030"),
-    ("1240", "小金井公園", "12400020", "1030"),
-    ("1260", "野川公園", "12600010", "1030"),
-    ("1270", "府中の森公園", "12700020", "1030"),
-    ("1280", "東大和南公園", "12800020", "1030"),
-    ("1315", "大井ふ頭海浜公園Ｂ", "13150090", "1030"),
-    ("1360", "有明テニスＣ人工芝コート", "13600010", "1030"),
-];
+/// 이번달 말일 계산
+fn last_day_of_month(date: NaiveDate) -> NaiveDate {
+    let (y, m) = (date.year(), date.month());
+    let (next_y, next_m) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    NaiveDate::from_ymd_opt(next_y, next_m, 1).unwrap() - Duration::days(1)
+}
 
-#[tauri::command]
-fn list_courts() -> Vec<(String, String, String)> {
-    COURTS
-        .iter()
-        .map(|(_bld_cd, name, inst_cd, sport_code)| {
-            (inst_cd.to_string(), name.to_string(), sport_code.to_string())
-        })
-        .collect()
+/// 검색 기간: 오늘 ~ 1주일 뒤 (임시로 1주만 검색, 원래는 이번달 말일까지)
+pub(crate) fn current_search_period() -> (NaiveDate, NaiveDate) {
+    let today = Local::now().date_naive();
+    (today, today + Duration::days(6))
+}
+
+fn is_weekend(use_day: i64) -> bool {
+    let s = use_day.to_string();
+    let parsed = (|| {
+        Some(NaiveDate::from_ymd_opt(
+            s.get(0..4)?.parse().ok()?,
+            s.get(4..6)?.parse().ok()?,
+            s.get(6..8)?.parse().ok()?,
+        )?)
+    })();
+    matches!(parsed.map(|d| d.weekday()), Some(Weekday::Sat) | Some(Weekday::Sun))
+}
+
+fn use_day_num(date: NaiveDate) -> i64 {
+    date.format("%Y%m%d").to_string().parse().unwrap_or(0)
 }
 
 #[tauri::command]
 async fn search_vacant(
     state: State<'_, AppState>,
-    date: String,
     inst_cd: String,
+    day_filter: String,
 ) -> Result<Vec<AvailableSlot>, String> {
-    let &(bld_cd, park_name, inst_cd, sport_code) = COURTS
+    let &(bld_cd, park_name, inst_cd, sport_code) = courts::COURTS
         .iter()
         .find(|(_, _, i, _)| *i == inst_cd)
         .ok_or_else(|| format!("알 수 없는 코트입니다: {}", inst_cd))?;
 
-    let use_day_str = date.replace("-", "");
     let client = state.client.lock().await;
 
     // 로그인 없이 검색만 할 경우 세션(JSESSIONID)이 없어 이후 요청이 에러 화면을 반환하므로 먼저 세션을 확보한다.
     client.get(format!("{}/index.jsp", BASE_URL)).send().await.map_err(|e| e.to_string())?;
 
+    let (period_start, period_end) = current_search_period();
+    let period_start_num = use_day_num(period_start);
+    let period_end_num = use_day_num(period_end);
+
     let ppscl_ppscd = format!("1000_{}", sport_code);
-    let mut init_params = HashMap::new();
-    init_params.insert("daystart", date.as_str());
-    init_params.insert("useDay", use_day_str.as_str());
-    init_params.insert("selectPpsClPpscd", ppscl_ppscd.as_str());
-    init_params.insert("selectPpsClsCd", "1000");
-    init_params.insert("selectPpsCd", sport_code);
-    init_params.insert("selectBldCd", bld_cd);
-    init_params.insert("selectInstCd", inst_cd);
-    init_params.insert("selectAreaBcd", bld_cd);
-    init_params.insert("selectIcd", "0");
-    init_params.insert("penaltyday", "3");
-    init_params.insert("penalty", "3");
-    init_params.insert("dayofweekClearFlg", "1");
-    init_params.insert("timezoneClearFlg", "1");
-    init_params.insert("displayNo", "prwrc2000");
-    init_params.insert("displayNoFrm", "prwrc2000");
-    init_params.insert("selectSize", "0");
-    init_params.insert("applyFlg", "0");
-    init_params.insert("initBcd", "null");
-    init_params.insert("initIcd", "null");
-    init_params.insert("initPpsClPpscd", "null");
-
-    client
-        .post(format!("{}/rsvWOpeInstSrchVacantAction.do", BASE_URL))
-        .form(&init_params)
-        .send().await.map_err(|e| e.to_string())?;
-
-    let mut params = HashMap::new();
-    params.insert("displayNo", "prwrc2000");
-    params.insert("useDay", use_day_str.as_str());
-    params.insert("bldCd", bld_cd);
-    params.insert("instCd", inst_cd);
-    params.insert("transVacantMode", "11");
-    params.insert("clearFlag", "0");
-
-    let body = client
-        .post(format!("{}/rsvWOpeInstSrchVacantAjaxAction.do", BASE_URL))
-        .form(&params)
-        .send().await.map_err(|e| e.to_string())?
-        .text().await.map_err(|e| e.to_string())?;
-
-    let vacant: VacantResponse = serde_json::from_str(&body)
-        .map_err(|e| format!("{}: {}", e, &body[..body.len().min(200)]))?;
-
     let mut slots: Vec<AvailableSlot> = vec![];
-    for tzone in vacant.result {
-        for tr in tzone.time_result {
-            if tr.status == 0 && tr.rsv_num > 0 {
-                slots.push(AvailableSlot {
-                    park_name: park_name.to_string(),
-                    tzone_name: tzone.tzone_name.trim().to_string(),
-                    use_day: tr.use_day,
-                    rsv_num: tr.rsv_num,
-                });
+
+    // 사이트 API가 한 번 호출에 요청한 날짜 기준 7일치만 반환하므로, 7일 간격으로 훑어서 이번달 전체를 커버한다.
+    let mut anchor = period_start;
+    while anchor <= period_end {
+        let date_str = anchor.format("%Y-%m-%d").to_string();
+        let use_day_str = anchor.format("%Y%m%d").to_string();
+
+        let mut init_params = HashMap::new();
+        init_params.insert("daystart", date_str.as_str());
+        init_params.insert("useDay", use_day_str.as_str());
+        init_params.insert("selectPpsClPpscd", ppscl_ppscd.as_str());
+        init_params.insert("selectPpsClsCd", "1000");
+        init_params.insert("selectPpsCd", sport_code);
+        init_params.insert("selectBldCd", bld_cd);
+        init_params.insert("selectInstCd", inst_cd);
+        init_params.insert("selectAreaBcd", bld_cd);
+        init_params.insert("selectIcd", "0");
+        init_params.insert("penaltyday", "3");
+        init_params.insert("penalty", "3");
+        init_params.insert("dayofweekClearFlg", "1");
+        init_params.insert("timezoneClearFlg", "1");
+        init_params.insert("displayNo", "prwrc2000");
+        init_params.insert("displayNoFrm", "prwrc2000");
+        init_params.insert("selectSize", "0");
+        init_params.insert("applyFlg", "0");
+        init_params.insert("initBcd", "null");
+        init_params.insert("initIcd", "null");
+        init_params.insert("initPpsClPpscd", "null");
+
+        client
+            .post(format!("{}/rsvWOpeInstSrchVacantAction.do", BASE_URL))
+            .form(&init_params)
+            .send().await.map_err(|e| e.to_string())?;
+
+        let mut params = HashMap::new();
+        params.insert("displayNo", "prwrc2000");
+        params.insert("useDay", use_day_str.as_str());
+        params.insert("bldCd", bld_cd);
+        params.insert("instCd", inst_cd);
+        params.insert("transVacantMode", "11");
+        params.insert("clearFlag", "0");
+
+        let body = client
+            .post(format!("{}/rsvWOpeInstSrchVacantAjaxAction.do", BASE_URL))
+            .form(&params)
+            .send().await.map_err(|e| e.to_string())?
+            .text().await.map_err(|e| e.to_string())?;
+
+        let vacant: VacantResponse = serde_json::from_str(&body)
+            .map_err(|e| format!("{}: {}", e, &body[..body.len().min(200)]))?;
+
+        for tzone in vacant.result {
+            for tr in tzone.time_result {
+                let in_range = tr.use_day >= period_start_num && tr.use_day <= period_end_num;
+                let day_ok = match day_filter.as_str() {
+                    "weekday" => !is_weekend(tr.use_day),
+                    "weekend" => is_weekend(tr.use_day),
+                    _ => true,
+                };
+                if tr.status == 0 && tr.rsv_num > 0 && in_range && day_ok {
+                    slots.push(AvailableSlot {
+                        park_name: park_name.to_string(),
+                        tzone_name: tzone.tzone_name.trim().to_string(),
+                        use_day: tr.use_day,
+                        rsv_num: tr.rsv_num,
+                    });
+                }
             }
         }
+
+        anchor += Duration::days(7);
     }
 
     Ok(slots)
-}
-
-/// 고정 수신 주소로 테스트 메일 발송 (Gmail SMTP, 기능 시험용)
-const TEST_MAIL_TO: &str = "ub3679@gmail.com";
-
-#[tauri::command]
-async fn send_test_mail() -> Result<String, String> {
-    let smtp_user = std::env::var("SMTP_USER")
-        .map_err(|_| "SMTP_USER 환경변수가 설정되지 않았습니다.".to_string())?;
-    let smtp_pass = std::env::var("SMTP_PASS")
-        .map_err(|_| "SMTP_PASS 환경변수가 설정되지 않았습니다.".to_string())?;
-
-    let email = Message::builder()
-        .from(smtp_user.parse().map_err(|e| format!("보내는 주소 오류: {}", e))?)
-        .to(TEST_MAIL_TO.parse().map_err(|e| format!("받는 주소 오류: {}", e))?)
-        .subject("tennis-navi 테스트 메일")
-        .body(String::from("이것은 tennis-navi 메일 발송 기능 테스트입니다."))
-        .map_err(|e| e.to_string())?;
-
-    let creds = Credentials::new(smtp_user, smtp_pass);
-
-    let mailer = AsyncSmtpTransport::<Tokio1Executor>::relay("smtp.gmail.com")
-        .map_err(|e| e.to_string())?
-        .credentials(creds)
-        .build();
-
-    mailer.send(email).await.map_err(|e| e.to_string())?;
-
-    Ok("메일 발송 성공".to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -274,7 +246,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState { client: Mutex::new(client) })
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![login, list_courts, search_vacant, send_test_mail])
+        .invoke_handler(tauri::generate_handler![login, courts::list_courts, search_vacant, mail::send_result_mail])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

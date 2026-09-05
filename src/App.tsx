@@ -16,9 +16,21 @@ const SPORT_TYPES: [code: string, label: string][] = [
   ["1020", "ハードコート"],
 ];
 
+const DAY_FILTERS: [code: string, label: string][] = [
+  ["all", "평일+주말"],
+  ["weekday", "평일"],
+  ["weekend", "주말"],
+];
+
+const WEEKDAYS = ["일", "월", "화", "수", "목", "금", "토"];
+
 function formatDay(useDay: number): string {
   const s = String(useDay);
-  return `${s.slice(0, 4)}/${s.slice(4, 6)}/${s.slice(6, 8)}`;
+  const y = Number(s.slice(0, 4));
+  const m = Number(s.slice(4, 6)) - 1;
+  const d = Number(s.slice(6, 8));
+  const w = WEEKDAYS[new Date(y, m, d).getDay()];
+  return `${s.slice(0, 4)}/${s.slice(4, 6)}/${s.slice(6, 8)} (${w})`;
 }
 
 const today = new Date().toISOString().split("T")[0];
@@ -27,10 +39,12 @@ function App() {
   const [date, setDate] = useState(today);
   const [courts, setCourts] = useState<Court[]>([]);
   const [sportCode, setSportCode] = useState(SPORT_TYPES[0][0]);
+  const [dayFilter, setDayFilter] = useState(DAY_FILTERS[0][0]);
   const [instCd, setInstCd] = useState("");
   const [slots, setSlots] = useState<AvailableSlot[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [searched, setSearched] = useState(false);
   const [mailSending, setMailSending] = useState(false);
   const [mailStatus, setMailStatus] = useState("");
 
@@ -51,8 +65,9 @@ function App() {
     setError("");
     setSlots([]);
     try {
-      const result = await invoke<AvailableSlot[]>("search_vacant", { date, instCd });
+      const result = await invoke<AvailableSlot[]>("search_vacant", { instCd, dayFilter });
       setSlots(result);
+      setSearched(true);
     } catch (e) {
       setError(`에러: ${e}`);
     } finally {
@@ -60,11 +75,12 @@ function App() {
     }
   }
 
-  async function sendTestMail() {
+  async function sendResultMail() {
     setMailSending(true);
     setMailStatus("");
     try {
-      const msg = await invoke<string>("send_test_mail");
+      const courtName = courts.find(([code]) => code === instCd)?.[1] ?? "";
+      const msg = await invoke<string>("send_result_mail", { courtName, slots });
       setMailStatus(msg);
     } catch (e) {
       setMailStatus(`메일 발송 실패: ${e}`);
@@ -110,6 +126,17 @@ function App() {
               </option>
             ))}
           </select>
+          <select
+            value={dayFilter}
+            onChange={(e) => setDayFilter(e.target.value)}
+            className="border rounded px-3 py-2 text-sm"
+          >
+            {DAY_FILTERS.map(([code, label]) => (
+              <option key={code} value={code}>
+                {label}
+              </option>
+            ))}
+          </select>
           <button
             onClick={search}
             disabled={loading || !instCd}
@@ -118,7 +145,7 @@ function App() {
             {loading ? "検索中..." : "検索"}
           </button>
           <button
-            onClick={sendTestMail}
+            onClick={sendResultMail}
             disabled={mailSending}
             className="px-4 py-2 bg-gray-700 text-white rounded hover:bg-gray-800 disabled:opacity-50"
           >
@@ -155,8 +182,12 @@ function App() {
           </div>
         )}
 
-        {!loading && slots.length === 0 && !error && (
+        {!loading && slots.length === 0 && !error && !searched && (
           <p className="mt-4 text-gray-400 text-sm">버튼을 눌러 검색해주세요.</p>
+        )}
+
+        {!loading && slots.length === 0 && !error && searched && (
+          <p className="mt-4 text-gray-400 text-sm">검색 결과가 없습니다 (빈 자리 없음).</p>
         )}
       </section>
     </main>
