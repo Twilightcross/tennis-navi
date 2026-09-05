@@ -1,3 +1,5 @@
+use lettre::transport::smtp::authentication::Credentials;
+use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::Mutex;
@@ -230,9 +232,39 @@ async fn search_vacant(
     Ok(slots)
 }
 
+/// 고정 수신 주소로 테스트 메일 발송 (Gmail SMTP, 기능 시험용)
+const TEST_MAIL_TO: &str = "ub3679@gmail.com";
+
+#[tauri::command]
+async fn send_test_mail() -> Result<String, String> {
+    let smtp_user = std::env::var("SMTP_USER")
+        .map_err(|_| "SMTP_USER 환경변수가 설정되지 않았습니다.".to_string())?;
+    let smtp_pass = std::env::var("SMTP_PASS")
+        .map_err(|_| "SMTP_PASS 환경변수가 설정되지 않았습니다.".to_string())?;
+
+    let email = Message::builder()
+        .from(smtp_user.parse().map_err(|e| format!("보내는 주소 오류: {}", e))?)
+        .to(TEST_MAIL_TO.parse().map_err(|e| format!("받는 주소 오류: {}", e))?)
+        .subject("tennis-navi 테스트 메일")
+        .body(String::from("이것은 tennis-navi 메일 발송 기능 테스트입니다."))
+        .map_err(|e| e.to_string())?;
+
+    let creds = Credentials::new(smtp_user, smtp_pass);
+
+    let mailer = AsyncSmtpTransport::<Tokio1Executor>::relay("smtp.gmail.com")
+        .map_err(|e| e.to_string())?
+        .credentials(creds)
+        .build();
+
+    mailer.send(email).await.map_err(|e| e.to_string())?;
+
+    Ok("메일 발송 성공".to_string())
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    dotenvy::dotenv().ok();
+
     let client = reqwest::Client::builder()
         .cookie_store(true)
         .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
@@ -242,7 +274,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState { client: Mutex::new(client) })
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![login, list_courts, search_vacant])
+        .invoke_handler(tauri::generate_handler![login, list_courts, search_vacant, send_test_mail])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

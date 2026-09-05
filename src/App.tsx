@@ -31,6 +31,8 @@ function App() {
   const [slots, setSlots] = useState<AvailableSlot[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [mailSending, setMailSending] = useState(false);
+  const [mailStatus, setMailStatus] = useState("");
 
   const courtsOfType = courts.filter(([, , code]) => code === sportCode);
 
@@ -55,6 +57,19 @@ function App() {
       setError(`에러: ${e}`);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function sendTestMail() {
+    setMailSending(true);
+    setMailStatus("");
+    try {
+      const msg = await invoke<string>("send_test_mail");
+      setMailStatus(msg);
+    } catch (e) {
+      setMailStatus(`메일 발송 실패: ${e}`);
+    } finally {
+      setMailSending(false);
     }
   }
 
@@ -102,9 +117,17 @@ function App() {
           >
             {loading ? "検索中..." : "検索"}
           </button>
+          <button
+            onClick={sendTestMail}
+            disabled={mailSending}
+            className="px-4 py-2 bg-gray-700 text-white rounded hover:bg-gray-800 disabled:opacity-50"
+          >
+            {mailSending ? "송신 중..." : "송신"}
+          </button>
         </div>
 
         {error && <p className="text-red-500 text-sm">{error}</p>}
+        {mailStatus && <p className="text-gray-500 text-sm">{mailStatus}</p>}
 
         {slots.length > 0 && (
           <div className="mt-2">
